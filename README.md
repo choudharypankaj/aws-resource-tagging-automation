@@ -99,13 +99,36 @@ aws resourcegroupstaggingapi get-tag-values --region <region> --key Owner
 
 The tagger resolves the CloudTrail principal by type:
 
-| Principal type | Resolution |
-| --- | --- |
-| Federated user (`AWSReservedSSO`) | Session name is the identity store username |
-| IAM user | `userIdentity.userName` |
-| EC2 instance profile (`role/i-…`) | A controller, not an owner → `inherit` |
-| Service principal (`invokedBy` set) | No human → `inherit`, `ManagedBy` = service |
-| Other assumed role | SSM role → owner map |
+Resolution prefers the real human identity wherever it is discoverable, and
+falls back to the role map only for machine principals. The **event-driven
+tagger and the reconciliation sweep share the same logic**, so a resource
+backfilled later gets the same `Owner` it would have received at creation.
+
+| Order | Principal type | `Owner` becomes |
+| --- | --- | --- |
+| 1 | IAM user | `userIdentity.userName` |
+| 2 | Federated user (`AWSReservedSSO` / SAML) | Session name — the identity store username, e.g. `alice@example.com` |
+| 3 | Assumed role with a person-like session name | That session name |
+| 4 | EC2 instance profile (`role/i-…`) | A controller, not an owner → `inherit` |
+| 5 | Service principal (`invokedBy` set) | No human → `inherit`, `ManagedBy` = service |
+| 6 | Machine role | SSM role → owner map, else `unresolved` |
+
+`looks_like_user()` rejects generic SDK session names (`botocore-session-*`,
+`aws-go-sdk-*`, `AutoScaling`, `i-*`) so an automation session is never mistaken
+for a person.
+
+### Pinning a specific user
+
+Federated users resolve to themselves automatically (rule 2). For a machine role
+that should be attributed to a named person, map it in `RoleOwnerMap`:
+
+```
+RoleOwnerMap='{"ci-deploy-role":"alice@example.com","AWSServiceRoleForAutoScaling":"inherit"}'
+```
+
+The sweep re-evaluates any resource whose `Owner` is missing **or**
+`unresolved`, so tightening the map fixes previously unattributed resources on
+the next pass.
 
 An unmapped principal produces `Owner=unresolved` rather than being skipped, so it surfaces in the coverage metric instead of disappearing.
 
@@ -122,6 +145,10 @@ An unmapped principal produces `Owner=unresolved` rather than being skipped, so 
 **The Resource Groups Tagging API omits resources with no tags at all.** A completely untagged S3 bucket is invisible to `get-resources`. Coverage computed from that API alone will read 100% while untagged resources exist — take the denominator from service-specific `describe-*` calls, or use AWS Config.
 
 **Config is detective, not preventive.** It evaluates resources that already exist. To block untagged deployments you need `AWS::Hooks::GuardHook` on stack operations, tag policies with required tag keys (AWS Organizations), or policy-as-code in CI.
+
+**The AWS Config rule requires an existing configuration recorder.** `EnableConfigRule` defaults to `false` for that reason; enabling it in an account without AWS Config turned on fails the stack with `NoAvailableConfigurationRecorder`.
+
+**Deleting the stack fails while the trail bucket has objects in it.** CloudTrail begins writing within minutes of creation, and CloudFormation cannot delete a non-empty bucket. Empty it first (including object versions) before `delete-stack`.
 
 **`AWS-SetRequiredTags` does not compose with Config remediation as you would expect.** It requires `ResourceARNs` (full ARNs) while Config's `RESOURCE_ID` supplies a bare resource ID. The mismatch produces `Targets: []`, tags nothing, and reports `Success`.
 

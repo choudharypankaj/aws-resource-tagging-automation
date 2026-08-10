@@ -197,15 +197,43 @@ def role_map():
     try: return json.loads(ssm.get_parameter(Name='/tagging/role-owner-map')['Parameter']['Value'])
     except Exception: return {}
 
+# Session names that identify an SDK/agent rather than a human.
+GENERIC_SESSIONS = ('botocore-session', 'aws-go-sdk', 'aws-sdk', 'AutoScaling',
+                    'OrganizationAccountAccessRole', 'AWSCloudFormation')
+
+def looks_like_user(sess):
+    """True when the role session name identifies a person."""
+    if not sess or sess.startswith('i-'):
+        return False
+    if sess.startswith(GENERIC_SESSIONS):
+        return False
+    return '@' in sess or '.' in sess or sess.isalnum()
+
 def resolve(ui):
+    """Return (Owner, CreatedBy, ManagedBy).
+
+    Owner resolution prefers the real human identity wherever it is
+    discoverable, falling back to the role -> owner map only for machine
+    principals:
+      1. IAM user            -> userName
+      2. Federated user      -> session name (IAM Identity Center / SAML)
+      3. Assumed role with a person-like session name -> that session name
+      4. Service principal / instance profile -> 'inherit'
+      5. Anything else       -> role map, else 'unresolved'
+    """
     arn=ui.get('arn') or ''; invoked=ui.get('invokedBy')
     issuer=(ui.get('sessionContext') or {}).get('sessionIssuer') or {}
     created=arn or invoked or ui.get('type','unknown')
     if invoked:                       return ('inherit', created, invoked.split('.')[0])
     if ui.get('type')=='IAMUser':     return (ui.get('userName','unresolved'), created, 'manual')
     sess=arn.split('/')[-1] if '/' in arn else ''
-    if 'AWSReservedSSO' in (issuer.get('arn') or ''): return (sess, created, 'manual')
+    # Federated: the session name IS the identity store username.
+    if 'AWSReservedSSO' in (issuer.get('arn') or '') or 'saml' in (issuer.get('arn') or '').lower():
+        return (sess or 'unresolved', created, 'federated')
     if sess.startswith('i-'):         return ('inherit', created, 'instance-profile')
+    # Any other assumed role whose session names a person.
+    if looks_like_user(sess):         return (sess, created, 'manual')
+    # Machine principal: role -> owner map (may pin a specific user).
     return (role_map().get(issuer.get('userName',''), 'unresolved'), created, 'manual')
 
 def current(arn):
