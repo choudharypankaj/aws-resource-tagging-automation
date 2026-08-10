@@ -3,6 +3,33 @@ REGION=os.environ.get("AWS_REGION","us-west-2"); ACCT=os.environ["ACCT"]
 ec2=boto3.client("ec2",region_name=REGION)
 asg=boto3.client("autoscaling",region_name=REGION)
 cfn=boto3.client("cloudformation",region_name=REGION)
+
+_stackres_cache={}
+
+def is_stack_managed(arn, tags):
+    """True when CloudFormation *directly* manages this resource.
+
+    Per the design doc: the automation must skip stack-managed resources,
+    because CloudFormation has no ignore_tags equivalent and out-of-band tags
+    show up as stack drift. ASG-launched instances inherit the stack tags by
+    propagation but are NOT stack resources, so they are still fair game --
+    hence the DescribeStackResources check rather than a tag-presence test.
+    """
+    stack = tags.get('aws:cloudformation:stack-name')
+    if not stack:
+        return False
+    rid = arn.split('/')[-1] if '/' in arn else arn.split(':')[-1]
+    if stack not in _stackres_cache:
+        try:
+            _stackres_cache[stack] = {
+                r['PhysicalResourceId']
+                for r in cfn.describe_stack_resources(StackName=stack)['StackResources']
+            }
+        except Exception as e:
+            print('stack lookup failed', stack, e)
+            _stackres_cache[stack] = set()
+    return rid in _stackres_cache[stack]
+
 s3=boto3.client("s3",region_name=REGION)
 ct=boto3.client("cloudtrail",region_name=REGION)
 ssm=boto3.client("ssm",region_name=REGION)
@@ -87,6 +114,8 @@ def main(event, context):
     # 1. instances
     for iid,t in inst.items():
         need={}
+        if is_stack_managed(f"arn:aws:ec2:{REGION}:{ACCT}:instance/{iid}", t):
+            print("SKIP (CloudFormation-managed):", iid); continue
         ui = None
         if t.get("Owner") in (None,"unresolved") or "CreatedBy" not in t or "ManagedBy" not in t:
             ui = identity_from_cloudtrail("RunInstances", iid)

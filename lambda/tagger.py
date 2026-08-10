@@ -193,6 +193,34 @@ def aws_logs(event):
 # ------------------------------------------------ resolution + guardrails ---
 ssm=boto3.client('ssm'); tagapi=boto3.client('resourcegroupstaggingapi')
 
+cfn=boto3.client('cloudformation')
+_stackres_cache={}
+
+def is_stack_managed(arn, tags):
+    """True when CloudFormation *directly* manages this resource.
+
+    Per the design doc: the automation must skip stack-managed resources,
+    because CloudFormation has no ignore_tags equivalent and out-of-band tags
+    show up as stack drift. ASG-launched instances inherit the stack tags by
+    propagation but are NOT stack resources, so they are still fair game --
+    hence the DescribeStackResources check rather than a tag-presence test.
+    """
+    stack = tags.get('aws:cloudformation:stack-name')
+    if not stack:
+        return False
+    rid = arn.split('/')[-1] if '/' in arn else arn.split(':')[-1]
+    if stack not in _stackres_cache:
+        try:
+            _stackres_cache[stack] = {
+                r['PhysicalResourceId']
+                for r in cfn.describe_stack_resources(StackName=stack)['StackResources']
+            }
+        except Exception as e:
+            print('stack lookup failed', stack, e)
+            _stackres_cache[stack] = set()
+    return rid in _stackres_cache[stack]
+
+
 def role_map():
     try: return json.loads(ssm.get_parameter(Name='/tagging/role-owner-map')['Parameter']['Value'])
     except Exception: return {}
@@ -256,6 +284,8 @@ def main(event, context):
     for arn in arns:
         try: cur=current(arn)
         except Exception: cur={}
+        if is_stack_managed(arn, cur):
+            print("SKIP (CloudFormation-managed, avoids stack drift):", arn); continue
         if 'ManagedBy' in cur: print("SKIP (ManagedBy set):",arn); continue
         if cur.get('Owner','').endswith('.amazonaws.com'): print("SKIP (AWS-owned):",arn); continue
         tags={'CreatedBy':created[:255],'ManagedBy':managed}

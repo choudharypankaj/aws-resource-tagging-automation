@@ -131,6 +131,7 @@ Resources:
                   - autoscaling:DescribeAutoScalingGroups
                   - autoscaling:DescribeTags
                   - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResources
                   - s3:ListAllMyBuckets
                   - s3:GetBucketTagging
                   - s3:PutBucketTagging
@@ -374,6 +375,34 @@ Resources:
           # ------------------------------------------------ resolution + guardrails ---
           ssm=boto3.client('ssm'); tagapi=boto3.client('resourcegroupstaggingapi')
 
+          cfn=boto3.client('cloudformation')
+          _stackres_cache={}
+
+          def is_stack_managed(arn, tags):
+              """True when CloudFormation *directly* manages this resource.
+
+              Per the design doc: the automation must skip stack-managed resources,
+              because CloudFormation has no ignore_tags equivalent and out-of-band tags
+              show up as stack drift. ASG-launched instances inherit the stack tags by
+              propagation but are NOT stack resources, so they are still fair game --
+              hence the DescribeStackResources check rather than a tag-presence test.
+              """
+              stack = tags.get('aws:cloudformation:stack-name')
+              if not stack:
+                  return False
+              rid = arn.split('/')[-1] if '/' in arn else arn.split(':')[-1]
+              if stack not in _stackres_cache:
+                  try:
+                      _stackres_cache[stack] = {
+                          r['PhysicalResourceId']
+                          for r in cfn.describe_stack_resources(StackName=stack)['StackResources']
+                      }
+                  except Exception as e:
+                      print('stack lookup failed', stack, e)
+                      _stackres_cache[stack] = set()
+              return rid in _stackres_cache[stack]
+
+
           def role_map():
               try: return json.loads(ssm.get_parameter(Name='/tagging/role-owner-map')['Parameter']['Value'])
               except Exception: return {}
@@ -437,6 +466,8 @@ Resources:
               for arn in arns:
                   try: cur=current(arn)
                   except Exception: cur={}
+                  if is_stack_managed(arn, cur):
+                      print("SKIP (CloudFormation-managed, avoids stack drift):", arn); continue
                   if 'ManagedBy' in cur: print("SKIP (ManagedBy set):",arn); continue
                   if cur.get('Owner','').endswith('.amazonaws.com'): print("SKIP (AWS-owned):",arn); continue
                   tags={'CreatedBy':created[:255],'ManagedBy':managed}
@@ -519,6 +550,33 @@ Resources:
           ec2=boto3.client("ec2",region_name=REGION)
           asg=boto3.client("autoscaling",region_name=REGION)
           cfn=boto3.client("cloudformation",region_name=REGION)
+
+          _stackres_cache={}
+
+          def is_stack_managed(arn, tags):
+              """True when CloudFormation *directly* manages this resource.
+
+              Per the design doc: the automation must skip stack-managed resources,
+              because CloudFormation has no ignore_tags equivalent and out-of-band tags
+              show up as stack drift. ASG-launched instances inherit the stack tags by
+              propagation but are NOT stack resources, so they are still fair game --
+              hence the DescribeStackResources check rather than a tag-presence test.
+              """
+              stack = tags.get('aws:cloudformation:stack-name')
+              if not stack:
+                  return False
+              rid = arn.split('/')[-1] if '/' in arn else arn.split(':')[-1]
+              if stack not in _stackres_cache:
+                  try:
+                      _stackres_cache[stack] = {
+                          r['PhysicalResourceId']
+                          for r in cfn.describe_stack_resources(StackName=stack)['StackResources']
+                      }
+                  except Exception as e:
+                      print('stack lookup failed', stack, e)
+                      _stackres_cache[stack] = set()
+              return rid in _stackres_cache[stack]
+
           s3=boto3.client("s3",region_name=REGION)
           ct=boto3.client("cloudtrail",region_name=REGION)
           ssm=boto3.client("ssm",region_name=REGION)
@@ -603,6 +661,8 @@ Resources:
               # 1. instances
               for iid,t in inst.items():
                   need={}
+                  if is_stack_managed(f"arn:aws:ec2:{REGION}:{ACCT}:instance/{iid}", t):
+                      print("SKIP (CloudFormation-managed):", iid); continue
                   ui = None
                   if t.get("Owner") in (None,"unresolved") or "CreatedBy" not in t or "ManagedBy" not in t:
                       ui = identity_from_cloudtrail("RunInstances", iid)

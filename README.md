@@ -134,9 +134,43 @@ An unmapped principal produces `Owner=unresolved` rather than being skipped, so 
 
 ## Guardrails
 
+- **Skips CloudFormation-managed resources** — writing tags to a resource CloudFormation owns shows up as stack drift, and CloudFormation has no `ignore_tags` equivalent. Both the tagger and the sweep check `DescribeStackResources` and skip resources that are actually in a stack
 - **Never overwrites an existing `ManagedBy`** — its presence signals another system manages the resource
 - **Skips AWS-owned resources** — any `Owner` value ending in `.amazonaws.com`
 - **Never fails closed** — an unresolved principal still gets `CreatedBy` and `ManagedBy`
+
+### Why a tag test is not enough for the drift guardrail
+
+An Auto Scaling group defined in a stack propagates `aws:cloudformation:stack-name`
+to every instance it launches, but those instances are **not** stack resources —
+CloudFormation manages the ASG, not its instances. Skipping on the mere presence
+of that tag would leave every ASG-launched instance and volume unattributed.
+
+`is_stack_managed()` therefore resolves the truth with `DescribeStackResources`
+and matches physical IDs. Measured on a stack containing one EC2 instance:
+
+| Resource | In the stack? | Action | Stack drift |
+| --- | --- | --- | --- |
+| `AWS::EC2::Instance` | yes | **skipped** | `IN_SYNC` |
+| attached EBS volume | no — created by EC2 | tagged, `Owner` inherited from the instance | `IN_SYNC` |
+
+Without the guardrail the same stack reported `DRIFTED` within seconds of
+creation, caused by the event-driven tagger rather than the sweep.
+
+### Distinguishing how a resource was created
+
+`ManagedBy` plus the parent pointers identify the creation path:
+
+| Path | `ManagedBy` | Parent pointers |
+| --- | --- | --- |
+| Console / CLI / SDK, direct | `manual` | none |
+| CloudFormation, direct stack resource | *(not tagged — skipped)* | `aws:cloudformation:*` |
+| Auto Scaling / EKS | `autoscaling` / `eks` | `aws:autoscaling:groupName`, `eks:*` |
+| Terraform | `manual` unless `default_tags` sets it | none |
+
+Terraform is the blind spot: CloudTrail sees an assumed deploy role with no
+`invokedBy`, so it looks manual. Set `ManagedBy = "terraform"` in `default_tags`
+to declare it.
 
 ## Known limitations
 
