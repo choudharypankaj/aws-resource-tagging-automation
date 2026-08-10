@@ -29,6 +29,7 @@ Parameters:
 
 Conditions:
   CreateBucket: !Equals [!Ref TrailS3Bucket, '']
+  UseExistingBucket: !Not [!Equals [!Ref TrailS3Bucket, '']]
   WantConfigRule: !Equals [!Ref EnableConfigRule, 'true']
 
 Resources:
@@ -66,12 +67,24 @@ Resources:
             Condition:
               StringEquals: { 's3:x-amz-acl': bucket-owner-full-control }
 
-  Trail:
+  TrailNewBucket:
     Type: AWS::CloudTrail::Trail
+    Condition: CreateBucket
     DependsOn: TrailBucketPolicy
     Properties:
       TrailName: !Ref TrailName
-      S3BucketName: !If [CreateBucket, !Ref TrailBucket, !Ref TrailS3Bucket]
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+  TrailExistingBucket:
+    Type: AWS::CloudTrail::Trail
+    Condition: UseExistingBucket
+    Properties:
+      TrailName: !Ref TrailName
+      S3BucketName: !Ref TrailS3Bucket
       IsLogging: true
       IsMultiRegionTrail: true
       IncludeGlobalServiceEvents: true
@@ -610,6 +623,6 @@ Outputs:
   SweepFunctionName:
     Value: !Ref SweepFunction
   TrailArn:
-    Value: !GetAtt Trail.Arn
+    Value: !If [CreateBucket, !GetAtt TrailNewBucket.Arn, !GetAtt TrailExistingBucket.Arn]
   RoleOwnerMapParameter:
     Value: !Ref RoleOwnerParameter
