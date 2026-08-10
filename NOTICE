@@ -1,0 +1,15 @@
+This project is derived from the AWS sample solution:
+
+  aws-samples/resource-tagging-automation
+  https://github.com/aws-samples/resource-tagging-automation
+  Copyright Amazon.com, Inc. or its affiliates. Licensed under MIT-0.
+
+Retained from upstream: the per-source dispatch pattern (event['source'] ->
+extractor function), the per-service ARN-construction logic, and the
+CloudFormation packaging approach.
+
+Added in this project: derived Owner/CreatedBy/ManagedBy resolution in place of
+static tags, an SSM-backed role-to-owner map, parent-pointer inheritance
+(Auto Scaling groups and CloudFormation stacks), a scheduled reconciliation
+sweep, tag-collision guardrails, an AWS Config detective rule, and support for
+14 additional services.
