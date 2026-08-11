@@ -71,7 +71,8 @@ aws cloudformation deploy \
 | `TrailName` | `resource-tagging-trail` | Name of the multi-Region trail |
 | `TrailS3Bucket` | *(blank)* | Existing bucket for trail logs. Blank creates one |
 | `SweepSchedule` | `rate(30 minutes)` | How often the reconciliation sweep runs |
-| `EnableConfigRule` | `true` | Deploy the AWS Config detective rule |
+| `EnableConfigRule` | `false` | Deploy the managed `REQUIRED_TAGS` rule. Requires an existing AWS Config configuration recorder |
+| `EnableCustomConfigRule` | `false` | Deploy `owner-tag-meaningful`, which also flags placeholder values. Requires a recorder |
 
 ## Before you deploy
 
@@ -177,6 +178,18 @@ to declare it.
 **`RunInstances` does not return volume IDs**, so the event-driven tagger cannot see an instance's root volume at launch. The sweep inherits it from the attached instance on its next pass. This is why both components are needed — neither alone is sufficient.
 
 **The Resource Groups Tagging API omits resources with no tags at all.** A completely untagged S3 bucket is invisible to `get-resources`. Coverage computed from that API alone will read 100% while untagged resources exist — take the denominator from service-specific `describe-*` calls, or use AWS Config.
+
+**`REQUIRED_TAGS` checks key presence, not value.** A resource carrying `Owner=unresolved` passes it. That state is produced whenever a parent — an Auto Scaling group, a CloudFormation stack, an EKS node group — was never given an `Owner` to propagate. Measured side by side on the same resources, the managed rule reported `COMPLIANT` for two resources the custom rule flagged as `placeholder value: Owner`.
+
+This matters most for infrastructure as code. The tagger **deliberately skips** CloudFormation-managed resources to avoid stack drift, so it can never repair them — a human has to change the template. Detection is the only control that population has, which makes an accurate rule essential rather than optional. A managed rule reporting green on an IaC resource whose stack has no `Owner` is worse than no rule, because it certifies a gap.
+
+Set `EnableCustomConfigRule=true` to deploy `owner-tag-meaningful`, which flags a key that is missing **or** set to a placeholder (`unresolved`, `unknown`, `none`, `n/a`, `tbd`, empty) and names the parent to fix:
+
+```
+missing: Owner; placeholder value: Owner; declare Owner on parent 'resource-tagging'
+```
+
+It reads `aws:cloudformation:stack-name`, `aws:autoscaling:groupName` or `eks:nodegroup-name` off the resource, so the finding points at a specific object rather than a general instruction.
 
 **Config is detective, not preventive.** It evaluates resources that already exist. To block untagged deployments you need `AWS::Hooks::GuardHook` on stack operations, tag policies with required tag keys (AWS Organizations), or policy-as-code in CI.
 
